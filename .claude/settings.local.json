@@ -1,0 +1,13 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(.mvnw.cmd spring-boot:run)",
+      "Bash(mvnw.cmd spring-boot:run)",
+      "Bash(dir)",
+      "Bash(mvnw clean compile)",
+      "Bash(./mvnw clean compile)"
+    ],
+    "deny": [],
+    "ask": []
+  }
+}
