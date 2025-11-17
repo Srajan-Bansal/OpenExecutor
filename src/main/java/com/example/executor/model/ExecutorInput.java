@@ -4,9 +4,10 @@ import lombok.Data;
 
 @Data
 public class ExecutorInput {
-    String language;
-    String code;
-    long problem_id;
-    String problem_name;
-    long user_id;
+    private String language;
+    private String code;
+    private Long problemId;
+    private String problemName;
+    private String userId;
+    private String submissionId;
 }

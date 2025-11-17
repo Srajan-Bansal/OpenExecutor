@@ -4,7 +4,10 @@ import lombok.Data;
 
 @Data
 public class Response {
-    Object data;
-    Object status;
-    Object errorList;
+    private Object data;
+    private String status;
+    private Object errorList;
+    private String submissionId;
+    private String userId;
+    private Long problemId;
 }
