@@ -4,6 +4,7 @@ import com.example.executor.constants.ExecutorConstants;
 import com.example.executor.model.ExecutorInput;
 import com.example.executor.utility.Response;
 import com.example.executor.utility.ResponseManager;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.kafka.annotation.KafkaListener;
@@ -28,13 +29,16 @@ public class ExecutorService {
     private final RedisTemplate<String, Object> redisTemplate;
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final TestCaseLoader testCaseLoader;
+    private final ObjectMapper objectMapper;
 
     public ExecutorService(ResponseManager responseManager, RedisTemplate<String, Object> redisTemplate,
-                           KafkaTemplate<String, String> kafkaTemplate, TestCaseLoader testCaseLoader) {
+                           KafkaTemplate<String, String> kafkaTemplate, TestCaseLoader testCaseLoader,
+                           ObjectMapper objectMapper) {
         this.responseManager = responseManager;
         this.redisTemplate = redisTemplate;
         this.kafkaTemplate = kafkaTemplate;
         this.testCaseLoader = testCaseLoader;
+        this.objectMapper = objectMapper;
     }
 
     @KafkaListener(topics = ExecutorConstants.KAFKA_TOPIC_EXECUTOR, groupId = ExecutorConstants.KAFKA_CONSUMER_GROUP)
@@ -50,7 +54,15 @@ public class ExecutorService {
         response.setSubmissionId(executorInput.getSubmissionId());
         response.setUserId(executorInput.getUserId());
         response.setProblemId(executorInput.getProblemId());
-        kafkaTemplate.send(ExecutorConstants.KAFKA_TOPIC_RESULTS, response.toString());
+
+        try {
+            String jsonResponse = objectMapper.writeValueAsString(response);
+            log.info("Sending JSON to Kafka: {}", jsonResponse);
+            kafkaTemplate.send(ExecutorConstants.KAFKA_TOPIC_RESULTS, jsonResponse);
+            log.info("Sent execution result for submission: {}", executorInput.getSubmissionId());
+        } catch (Exception e) {
+            log.error("Failed to serialize response to JSON for submission: {}", executorInput.getSubmissionId(), e);
+        }
     }
 
     private Response runExecution(ExecutorInput executorInput) throws IOException, InterruptedException {
@@ -90,14 +102,27 @@ public class ExecutorService {
                 if (executorInput.getLanguage().equalsIgnoreCase(ExecutorConstants.LANG_JAVA)) {
                     actualOutput = runInIsolateWithInput(ExecutorConstants.BOX_ID, input, testCaseLoader.getJavaPath(),
                             ExecutorConstants.JAVA_MEM_MAX, ExecutorConstants.JAVA_MEM_MIN,
-                            ExecutorConstants.JAVA_GC, "Main");
+                            ExecutorConstants.JAVA_METASPACE, ExecutorConstants.JAVA_METASPACE_MIN,
+                            ExecutorConstants.JAVA_CODE_CACHE, ExecutorConstants.JAVA_DISABLE_COMPRESSED_CLASS,
+                            ExecutorConstants.JAVA_GC, ExecutorConstants.JAVA_TIERED_COMPILATION, "Main");
                 } else {
                     actualOutput = runInIsolateWithInput(ExecutorConstants.BOX_ID, input, testCaseLoader.getNodePath(), ExecutorConstants.JS_MAIN_FILE);
                 }
 
                 actualOutput = actualOutput.trim();
 
-                if (actualOutput.equals(expected)) {
+                if (isRuntimeError(actualOutput)) {
+                    results.add(String.format("Test case %d failed with runtime error\nExpected: [%s]\nGot: [%s]",
+                            i + 1, expected, actualOutput));
+                    log.warn("Stopping execution due to runtime error at test case {}", i + 1);
+                    break;
+                }
+
+                // Normalize both outputs to handle spacing inconsistencies in arrays
+                String normalizedActual = normalizeOutput(actualOutput);
+                String normalizedExpected = normalizeOutput(expected);
+
+                if (normalizedActual.equals(normalizedExpected)) {
                     results.add("Test case " + (i + 1) + " passed");
                 } else {
                     results.add(String.format("Test case %d failed\nExpected: [%s]\nGot: [%s]",
@@ -190,5 +215,52 @@ public class ExecutorService {
             return ExecutorConstants.JS_MAIN_FILE;
         }
         return null;
+    }
+
+    private String normalizeOutput(String output) {
+        if (output == null) {
+            return "";
+        }
+        return output.replaceAll("\\s+", "");
+    }
+
+    private boolean isRuntimeError(String output) {
+        if (output == null || output.isEmpty()) {
+            return false;
+        }
+
+        // Check for JVM initialization and memory errors
+        if (output.contains("Error occurred during initialization of VM") ||
+            output.contains("Could not reserve enough space") ||
+            output.contains("Could not create the Java Virtual Machine") ||
+            output.contains("Could not allocate") ||
+            output.contains("There is insufficient memory") ||
+            output.contains("Failed to reserve memory") ||
+            output.contains("Native memory allocation") ||
+            output.contains("hs_err_pid")) {
+            return true;
+        }
+
+        // Check for common Java exceptions
+        if (output.contains("Exception in thread") ||
+            output.contains("java.lang.") && (output.contains("Exception") || output.contains("Error")) ||
+            output.contains("at java.") ||
+            output.contains("at sun.")) {
+            return true;
+        }
+
+        // Check for segmentation faults and system errors
+        if (output.contains("Segmentation fault") ||
+            output.contains("core dumped") ||
+            output.contains("fatal error")) {
+            return true;
+        }
+
+        // Check for process exit codes
+        if (output.contains("Process exited with code:") && !output.contains("code: 0")) {
+            return true;
+        }
+
+        return false;
     }
 }
