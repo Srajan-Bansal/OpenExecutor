@@ -1,6 +1,7 @@
 package com.example.executor.service;
 
 import com.example.executor.constants.ExecutorConstants;
+import com.example.executor.enums.RuntimeErrorPattern;
 import com.example.executor.model.ExecutorInput;
 import com.example.executor.utility.Response;
 import com.example.executor.utility.ResponseManager;
@@ -43,10 +44,12 @@ public class ExecutorService {
 
     @KafkaListener(topics = ExecutorConstants.KAFKA_TOPIC_EXECUTOR, groupId = ExecutorConstants.KAFKA_CONSUMER_GROUP)
     public void executeCode(ExecutorInput executorInput) throws IOException, InterruptedException {
-        log.info("Received execution request for problem: {}, language: {}", executorInput.getProblemName(), executorInput.getLanguage());
+        String boxId = String.valueOf(Math.abs(executorInput.getSubmissionId().hashCode()) % ExecutorConstants.MAX_BOX_ID);
+        log.info("Received execution request for problem: {}, language: {}, submissionId: {}, using BOX_ID: {}",
+                executorInput.getProblemName(), executorInput.getLanguage(), executorInput.getSubmissionId(), boxId);
         Response response;
         try {
-            response = runExecution(executorInput);
+            response = runExecution(executorInput, boxId);
         } catch (Exception e) {
             log.error("Execution failed for problem: {}", executorInput.getProblemName(), e);
             response = responseManager.error("Execution failed: " + e.getMessage());
@@ -65,7 +68,7 @@ public class ExecutorService {
         }
     }
 
-    private Response runExecution(ExecutorInput executorInput) throws IOException, InterruptedException {
+    private Response runExecution(ExecutorInput executorInput, String boxId) throws IOException, InterruptedException {
         try {
             String problemKey = ExecutorConstants.REDIS_PROBLEM_PREFIX + executorInput.getProblemName();
             List<String> inputs = (List<String>) redisTemplate.opsForValue().get(problemKey + ExecutorConstants.REDIS_INPUTS_SUFFIX);
@@ -75,22 +78,23 @@ public class ExecutorService {
                 return responseManager.error("Test cases not found for " + executorInput.getProblemName());
             }
 
-            runCommand("isolate", "--box-id=" + ExecutorConstants.BOX_ID, "--init");
-            Files.createDirectories(Paths.get(ExecutorConstants.BOX_PATH));
+            String boxPath = ExecutorConstants.BOX_BASE_PATH + boxId + "/box";
+            runCommand("isolate", "--box-id=" + boxId, "--init");
+            Files.createDirectories(Paths.get(boxPath));
 
             String fileName = generateFileName(executorInput.getLanguage());
-            Path codePath = Paths.get(ExecutorConstants.BOX_PATH, fileName);
+            Path codePath = Paths.get(boxPath, fileName);
             Files.writeString(codePath, executorInput.getCode());
 
             if (executorInput.getLanguage().equalsIgnoreCase(ExecutorConstants.LANG_JAVA)) {
-                String compileOutput = runCommand(testCaseLoader.getJavacPath(), ExecutorConstants.BOX_PATH + "/" + ExecutorConstants.JAVA_MAIN_FILE);
+                String compileOutput = runCommand(testCaseLoader.getJavacPath(), boxPath + "/" + ExecutorConstants.JAVA_MAIN_FILE);
                 if (!compileOutput.trim().isEmpty()) {
                     return responseManager.error("Compilation error:\n" + compileOutput);
                 }
             }
 
             List<String> results = new ArrayList<>();
-            Path inputFile = Paths.get(ExecutorConstants.BOX_PATH, ExecutorConstants.INPUT_FILE);
+            Path inputFile = Paths.get(boxPath, ExecutorConstants.INPUT_FILE);
 
             for (int i = 0; i < inputs.size(); i++) {
                 String input = inputs.get(i);
@@ -100,18 +104,18 @@ public class ExecutorService {
 
                 String actualOutput;
                 if (executorInput.getLanguage().equalsIgnoreCase(ExecutorConstants.LANG_JAVA)) {
-                    actualOutput = runInIsolateWithInput(ExecutorConstants.BOX_ID, input, testCaseLoader.getJavaPath(),
+                    actualOutput = runInIsolateWithInput(boxId, input, testCaseLoader.getJavaPath(),
                             ExecutorConstants.JAVA_MEM_MAX, ExecutorConstants.JAVA_MEM_MIN,
                             ExecutorConstants.JAVA_METASPACE, ExecutorConstants.JAVA_METASPACE_MIN,
                             ExecutorConstants.JAVA_CODE_CACHE, ExecutorConstants.JAVA_DISABLE_COMPRESSED_CLASS,
                             ExecutorConstants.JAVA_GC, ExecutorConstants.JAVA_TIERED_COMPILATION, "Main");
                 } else {
-                    actualOutput = runInIsolateWithInput(ExecutorConstants.BOX_ID, input, testCaseLoader.getNodePath(), ExecutorConstants.JS_MAIN_FILE);
+                    actualOutput = runInIsolateWithInput(boxId, input, testCaseLoader.getNodePath(), ExecutorConstants.JS_MAIN_FILE);
                 }
 
                 actualOutput = actualOutput.trim();
 
-                if (isRuntimeError(actualOutput)) {
+                if (RuntimeErrorPattern.isRuntimeError(actualOutput)) {
                     results.add(String.format("Test case %d failed with runtime error\nExpected: [%s]\nGot: [%s]",
                             i + 1, expected, actualOutput));
                     log.warn("Stopping execution due to runtime error at test case {}", i + 1);
@@ -130,13 +134,13 @@ public class ExecutorService {
                 }
             }
 
-            runCommand("isolate", "--box-id=" + ExecutorConstants.BOX_ID, "--cleanup");
+            runCommand("isolate", "--box-id=" + boxId, "--cleanup");
             boolean allPassed = results.stream().noneMatch(r -> r.contains("failed"));
             return allPassed
                     ? responseManager.success("All test cases passed")
                     : responseManager.success(results);
         } catch (Exception e) {
-            runCommand("isolate", "--box-id=" + ExecutorConstants.BOX_ID, "--cleanup");
+            runCommand("isolate", "--box-id=" + boxId, "--cleanup");
             return responseManager.error("Execution failed: " + e.getMessage());
         }
     }
@@ -214,7 +218,7 @@ public class ExecutorService {
         } else if (language.equalsIgnoreCase(ExecutorConstants.LANG_JAVASCRIPT) || language.equalsIgnoreCase(ExecutorConstants.LANG_JS)) {
             return ExecutorConstants.JS_MAIN_FILE;
         }
-        return null;
+        throw new IllegalArgumentException("Unsupported language: " + language);
     }
 
     private String normalizeOutput(String output) {
@@ -222,45 +226,5 @@ public class ExecutorService {
             return "";
         }
         return output.replaceAll("\\s+", "");
-    }
-
-    private boolean isRuntimeError(String output) {
-        if (output == null || output.isEmpty()) {
-            return false;
-        }
-
-        // Check for JVM initialization and memory errors
-        if (output.contains("Error occurred during initialization of VM") ||
-            output.contains("Could not reserve enough space") ||
-            output.contains("Could not create the Java Virtual Machine") ||
-            output.contains("Could not allocate") ||
-            output.contains("There is insufficient memory") ||
-            output.contains("Failed to reserve memory") ||
-            output.contains("Native memory allocation") ||
-            output.contains("hs_err_pid")) {
-            return true;
-        }
-
-        // Check for common Java exceptions
-        if (output.contains("Exception in thread") ||
-            output.contains("java.lang.") && (output.contains("Exception") || output.contains("Error")) ||
-            output.contains("at java.") ||
-            output.contains("at sun.")) {
-            return true;
-        }
-
-        // Check for segmentation faults and system errors
-        if (output.contains("Segmentation fault") ||
-            output.contains("core dumped") ||
-            output.contains("fatal error")) {
-            return true;
-        }
-
-        // Check for process exit codes
-        if (output.contains("Process exited with code:") && !output.contains("code: 0")) {
-            return true;
-        }
-
-        return false;
     }
 }

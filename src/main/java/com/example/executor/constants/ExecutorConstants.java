@@ -10,9 +10,8 @@ public final class ExecutorConstants {
     }
 
     // Sandbox Configuration
-    public static final String BOX_ID = "0";
     public static final String BOX_BASE_PATH = "/var/local/lib/isolate/";
-    public static final String BOX_PATH = BOX_BASE_PATH + BOX_ID + "/box";
+    public static final int MAX_BOX_ID = 100;
 
     // Execution Limits
     public static final int TIME_LIMIT = 5;
