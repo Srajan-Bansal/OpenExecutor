@@ -135,10 +135,7 @@ public class ExecutorService {
             }
 
             runCommand("isolate", "--box-id=" + boxId, "--cleanup");
-            boolean allPassed = results.stream().noneMatch(r -> r.contains("failed"));
-            return allPassed
-                    ? responseManager.success("All test cases passed")
-                    : responseManager.success(results);
+            return responseManager.success(results);
         } catch (Exception e) {
             runCommand("isolate", "--box-id=" + boxId, "--cleanup");
             return responseManager.error("Execution failed: " + e.getMessage());

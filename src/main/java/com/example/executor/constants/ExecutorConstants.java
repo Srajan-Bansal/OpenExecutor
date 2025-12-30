@@ -16,7 +16,7 @@ public final class ExecutorConstants {
     // Execution Limits
     public static final int TIME_LIMIT = 5;
     public static final int WALL_TIME_LIMIT = 10;
-    public static final int MEMORY_LIMIT = 524288; // 512MB in KB - required for JVM memory allocation
+    public static final int MEMORY_LIMIT = 1048576; // 1GB in KB - required for JVM memory allocation
     public static final int MAX_PROCESSES = 20;
 
     // Language Identifiers
@@ -48,13 +48,13 @@ public final class ExecutorConstants {
     public static final String DIR_INPUTS = "inputs";
     public static final String DIR_OUTPUTS = "outputs";
 
-    // Java Memory Settings (optimized for low-memory systems)
-    // Disabled compressed class pointers to eliminate compressed class space requirement
-    public static final String JAVA_MEM_MAX = "-Xmx128m";
-    public static final String JAVA_MEM_MIN = "-Xms64m";
-    public static final String JAVA_METASPACE = "-XX:MaxMetaspaceSize=64m";
-    public static final String JAVA_METASPACE_MIN = "-XX:MetaspaceSize=32m";
-    public static final String JAVA_CODE_CACHE = "-XX:ReservedCodeCacheSize=24m";
+    // Java Memory Settings (optimized for low-memory systems with 1GB sandbox limit)
+    // Aggressive memory reduction to fit within isolate sandbox
+    public static final String JAVA_MEM_MAX = "-Xmx64m";
+    public static final String JAVA_MEM_MIN = "-Xms32m";
+    public static final String JAVA_METASPACE = "-XX:MaxMetaspaceSize=32m";
+    public static final String JAVA_METASPACE_MIN = "-XX:MetaspaceSize=16m";
+    public static final String JAVA_CODE_CACHE = "-XX:ReservedCodeCacheSize=16m";
     public static final String JAVA_DISABLE_COMPRESSED_CLASS = "-XX:-UseCompressedClassPointers";
     public static final String JAVA_GC = "-XX:+UseSerialGC";
     public static final String JAVA_TIERED_COMPILATION = "-XX:TieredStopAtLevel=1";
