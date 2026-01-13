@@ -122,7 +122,6 @@ public class ExecutorService {
                     break;
                 }
 
-                // Normalize both outputs to handle spacing inconsistencies in arrays
                 String normalizedActual = normalizeOutput(actualOutput);
                 String normalizedExpected = normalizeOutput(expected);
 
