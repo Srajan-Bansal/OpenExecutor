@@ -10,4 +10,6 @@ public class Response {
     private String submissionId;
     private String userId;
     private Long problemId;
+    private Double[] runtime;  // Runtime in milliseconds for each test case
+    private Double[] memory;   // Memory usage in MB for each test case
 }

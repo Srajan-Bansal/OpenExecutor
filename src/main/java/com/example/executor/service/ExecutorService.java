@@ -3,6 +3,7 @@ package com.example.executor.service;
 import com.example.executor.constants.ExecutorConstants;
 import com.example.executor.enums.RuntimeErrorPattern;
 import com.example.executor.model.ExecutorInput;
+import com.example.executor.utility.BoxIdPool;
 import com.example.executor.utility.Response;
 import com.example.executor.utility.ResponseManager;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -31,40 +32,53 @@ public class ExecutorService {
     private final KafkaTemplate<String, String> kafkaTemplate;
     private final TestCaseLoader testCaseLoader;
     private final ObjectMapper objectMapper;
+    private final BoxIdPool boxIdPool;
 
     public ExecutorService(ResponseManager responseManager, RedisTemplate<String, Object> redisTemplate,
                            KafkaTemplate<String, String> kafkaTemplate, TestCaseLoader testCaseLoader,
-                           ObjectMapper objectMapper) {
+                           ObjectMapper objectMapper, BoxIdPool boxIdPool) {
         this.responseManager = responseManager;
         this.redisTemplate = redisTemplate;
         this.kafkaTemplate = kafkaTemplate;
         this.testCaseLoader = testCaseLoader;
         this.objectMapper = objectMapper;
+        this.boxIdPool = boxIdPool;
     }
 
     @KafkaListener(topics = ExecutorConstants.KAFKA_TOPIC_EXECUTOR, groupId = ExecutorConstants.KAFKA_CONSUMER_GROUP)
     public void executeCode(ExecutorInput executorInput) throws IOException, InterruptedException {
-        String boxId = String.valueOf(Math.abs(executorInput.getSubmissionId().hashCode()) % ExecutorConstants.MAX_BOX_ID);
-        log.info("Received execution request for problem: {}, language: {}, submissionId: {}, using BOX_ID: {}",
-                executorInput.getProblemName(), executorInput.getLanguage(), executorInput.getSubmissionId(), boxId);
-        Response response;
+        String boxId = null;
         try {
-            response = runExecution(executorInput, boxId);
-        } catch (Exception e) {
-            log.error("Execution failed for problem: {}", executorInput.getProblemName(), e);
-            response = responseManager.error("Execution failed: " + e.getMessage());
-        }
-        response.setSubmissionId(executorInput.getSubmissionId());
-        response.setUserId(executorInput.getUserId());
-        response.setProblemId(executorInput.getProblemId());
+            // Acquire a box ID from the pool (thread-safe)
+            boxId = boxIdPool.acquire();
+            log.info("Received execution request for problem: {}, language: {}, submissionId: {}, using BOX_ID: {}",
+                    executorInput.getProblemName(), executorInput.getLanguage(), executorInput.getSubmissionId(), boxId);
 
-        try {
-            String jsonResponse = objectMapper.writeValueAsString(response);
-            log.info("Sending JSON to Kafka: {}", jsonResponse);
-            kafkaTemplate.send(ExecutorConstants.KAFKA_TOPIC_RESULTS, jsonResponse);
-            log.info("Sent execution result for submission: {}", executorInput.getSubmissionId());
-        } catch (Exception e) {
-            log.error("Failed to serialize response to JSON for submission: {}", executorInput.getSubmissionId(), e);
+            Response response;
+            try {
+                response = runExecution(executorInput, boxId);
+            } catch (Exception e) {
+                log.error("Execution failed for problem: {}", executorInput.getProblemName(), e);
+                response = responseManager.error("Execution failed: " + e.getMessage());
+            }
+            response.setSubmissionId(executorInput.getSubmissionId());
+            response.setUserId(executorInput.getUserId());
+            response.setProblemId(executorInput.getProblemId());
+
+            try {
+                String jsonResponse = objectMapper.writeValueAsString(response);
+                log.info("Sending JSON to Kafka: {}", jsonResponse);
+                kafkaTemplate.send(ExecutorConstants.KAFKA_TOPIC_RESULTS, jsonResponse);
+                log.info("Sent execution result for submission: {}", executorInput.getSubmissionId());
+            } catch (Exception e) {
+                log.error("Failed to serialize response to JSON for submission: {}", executorInput.getSubmissionId(), e);
+            }
+        } finally {
+            // Always release the box ID back to the pool
+            if (boxId != null) {
+                boxIdPool.release(boxId);
+                log.info("Released box ID {} back to pool", boxId);
+            }
         }
     }
 
@@ -94,7 +108,10 @@ public class ExecutorService {
             }
 
             List<String> results = new ArrayList<>();
+            List<Double> runtimes = new ArrayList<>();
+            List<Double> memories = new ArrayList<>();
             Path inputFile = Paths.get(boxPath, ExecutorConstants.INPUT_FILE);
+            Path metaFile = Paths.get(boxPath, "meta.txt");
 
             for (int i = 0; i < inputs.size(); i++) {
                 String input = inputs.get(i);
@@ -104,16 +121,36 @@ public class ExecutorService {
 
                 String actualOutput;
                 if (executorInput.getLanguage().equalsIgnoreCase(ExecutorConstants.LANG_JAVA)) {
-                    actualOutput = runInIsolateWithInput(boxId, input, testCaseLoader.getJavaPath(),
+                    actualOutput = runInIsolateWithInput(boxId, input, metaFile.toString(), testCaseLoader.getJavaPath(),
                             ExecutorConstants.JAVA_MEM_MAX, ExecutorConstants.JAVA_MEM_MIN,
                             ExecutorConstants.JAVA_METASPACE, ExecutorConstants.JAVA_METASPACE_MIN,
                             ExecutorConstants.JAVA_CODE_CACHE, ExecutorConstants.JAVA_DISABLE_COMPRESSED_CLASS,
                             ExecutorConstants.JAVA_GC, ExecutorConstants.JAVA_TIERED_COMPILATION, "Main");
                 } else {
-                    actualOutput = runInIsolateWithInput(boxId, input, testCaseLoader.getNodePath(), ExecutorConstants.JS_MAIN_FILE);
+                    actualOutput = runInIsolateWithInput(boxId, input, metaFile.toString(), testCaseLoader.getNodePath(), ExecutorConstants.JS_MAIN_FILE);
                 }
 
                 actualOutput = actualOutput.trim();
+
+                // Parse meta file for runtime and memory
+                double runtime = 0.0;
+                double memory = 0.0;
+                try {
+                    List<String> metaLines = Files.readAllLines(metaFile);
+                    for (String line : metaLines) {
+                        if (line.startsWith("time:")) {
+                            runtime = Double.parseDouble(line.substring(5)) * 1000; // Convert to milliseconds
+                        } else if (line.startsWith("cg-mem:")) {
+                            memory = Double.parseDouble(line.substring(7)) / 1024.0; // Convert KB to MB
+                        } else if (memory == 0.0 && line.startsWith("max-rss:")) {
+                            memory = Double.parseDouble(line.substring(8)) / 1024.0; // Convert KB to MB (fallback)
+                        }
+                    }
+                } catch (Exception e) {
+                    log.warn("Failed to parse meta file: {}", e.getMessage());
+                }
+                runtimes.add(runtime);
+                memories.add(memory);
 
                 if (RuntimeErrorPattern.isRuntimeError(actualOutput)) {
                     results.add(String.format("Test case %d failed with runtime error\nExpected: [%s]\nGot: [%s]",
@@ -134,17 +171,21 @@ public class ExecutorService {
             }
 
             runCommand("isolate", "--box-id=" + boxId, "--cleanup");
-            return responseManager.success(results);
+            Response response = responseManager.success(results);
+            response.setRuntime(runtimes.toArray(new Double[0]));
+            response.setMemory(memories.toArray(new Double[0]));
+            return response;
         } catch (Exception e) {
             runCommand("isolate", "--box-id=" + boxId, "--cleanup");
             return responseManager.error("Execution failed: " + e.getMessage());
         }
     }
 
-    private String runInIsolateWithInput(String boxId, String input, String... innerCommand) throws IOException, InterruptedException {
+    private String runInIsolateWithInput(String boxId, String input, String metaFile, String... innerCommand) throws IOException, InterruptedException {
         List<String> command = new ArrayList<>();
         command.add("isolate");
         command.add("--box-id=" + boxId);
+        command.add("--meta=" + metaFile);
         command.add("--time=" + ExecutorConstants.TIME_LIMIT);
         command.add("--wall-time=" + ExecutorConstants.WALL_TIME_LIMIT);
         command.add("--mem=" + ExecutorConstants.MEMORY_LIMIT);
