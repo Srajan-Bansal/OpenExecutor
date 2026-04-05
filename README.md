@@ -1,51 +1,68 @@
-Yes, you can use that simpler approach! For Kafka 3.7.1, KRaft mode is the default, so it's much simpler:
+# OpenExecutor
 
-  Simple Kafka Setup
+A sandboxed code execution engine for [HackStack](https://github.com/Srajan-Bansal/HackStack) — built with Spring Boot.
 
-  # Run Redis (Alpine - smallest image ~40MB)
-  docker run -d --name hackstack-redis -p 6379:6379 redis:7.2-alpine
+## What it does
 
-  # Run Kafka (smallest available ~400MB)
-  docker run -d --name hackstack-kafka -p 9092:9092 apache/kafka:3.7.1
+1. Consumes code execution requests from Kafka (`code-executor` topic)
+2. Loads test cases from Redis (populated from [hackstack-problems](https://github.com/Srajan-Bansal/hackstack-problems) at startup)
+3. Compiles and runs code in isolated sandboxes using `isolate`
+4. Measures runtime and memory per test case
+5. Publishes results to Kafka (`code-results` topic)
 
-  Working with Kafka
+## Tech Stack
 
-  # Get into the Kafka container
-  docker exec -it hackstack-kafka /bin/bash
+- Java 17
+- Spring Boot 3.5
+- Apache Kafka (consumer + producer)
+- Redis (test case caching)
+- `isolate` (sandbox execution)
+- Maven
 
-  # Navigate to Kafka bin directory
-  cd /opt/kafka/bin
+## Getting Started
 
-  # Create the actual topics used by HackStack
-  ./kafka-topics.sh --create --topic code-executor --bootstrap-server localhost:9092
-  ./kafka-topics.sh --create --topic code-results --bootstrap-server localhost:9092
+### Prerequisites
 
-  # List topics
-  ./kafka-topics.sh --list --bootstrap-server localhost:9092
+- Java 17+
+- Redis running on `localhost:6379`
+- Kafka running on `localhost:9092`
+- `isolate` installed (for sandboxed execution)
+- [hackstack-problems](https://github.com/Srajan-Bansal/hackstack-problems) cloned as a sibling directory
 
-  # Monitor code-executor topic (execution requests)
-  ./kafka-console-consumer.sh --topic code-executor --from-beginning --bootstrap-server localhost:9092
+### Run
 
-  # Monitor code-results topic (execution results) - in another terminal
-  docker exec -it hackstack-kafka /bin/bash
-  cd /opt/kafka/bin
-  ./kafka-console-consumer.sh --topic code-results --from-beginning --bootstrap-server localhost:9092
+```bash
+# Build
+./mvnw clean package
 
-  Your .env configuration
+# Run
+./mvnw spring-boot:run
 
-  REDIS_URL=redis://localhost:6379
-  KAFKA_BROKER=localhost:9092
+# Run tests
+./mvnw test
+```
 
-  This simpler approach works perfectly for development! The Kafka 3.7.1 image comes pre-configured with KRaft mode, so no Zookeeper neede
+The service starts on port **8081**.
 
-# Kafka Monitorning UI
-  docker run -d \
-  -p 8080:8080 \
-  -e AKHQ_CONFIGURATION='
-akhq:
-  connections:
-    local:
-      properties:
-        bootstrap.servers: "localhost:9092"
-' \
-  tchiotludo/akhq
+### Configuration
+
+All configuration is in `src/main/resources/application.properties`:
+
+| Property | Default | Description |
+|----------|---------|-------------|
+| `server.port` | 8081 | Server port |
+| `spring.data.redis.host` | localhost | Redis host |
+| `spring.data.redis.port` | 6379 | Redis port |
+| `spring.kafka.bootstrap-servers` | localhost:9092 | Kafka broker |
+| `basePath` | ../hackstack-problems | Path to problems directory |
+
+### Supported Languages
+
+- Java
+- JavaScript
+
+## Related Repositories
+
+- [HackStack](https://github.com/Srajan-Bansal/HackStack) — Parent repository
+- [HackStack-monorepo](https://github.com/Srajan-Bansal/HackStack-monorepo) — Web frontend, backend API, webhook
+- [hackstack-problems](https://github.com/Srajan-Bansal/hackstack-problems) — Problem definitions and test cases
