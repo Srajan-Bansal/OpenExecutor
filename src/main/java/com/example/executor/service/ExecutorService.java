@@ -199,6 +199,7 @@ public class ExecutorService {
         command.add("--dir=/lib64=/lib64:maybe");
         command.add("--dir=/etc=/etc:maybe");
         command.add("--dir=/tmp=/tmp:rw");
+        command.add("--dir=/opt=/opt:maybe");
 
         command.add("--run");
         command.add("--");
